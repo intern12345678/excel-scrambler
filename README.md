@@ -6,9 +6,10 @@ the original values later. Works on macOS, Windows, and Linux.
 
 ## Install
 
-Clone the repo and run the install script for your OS — it checks for Python,
-creates a private virtual environment, installs all dependencies, and generates
-a double-clickable launcher.
+Clone the repo and run the install script for your OS — it installs everything
+needed, **including Python itself if it's missing**, then creates a private
+virtual environment, installs all dependencies, and generates a
+double-clickable launcher.
 
 **macOS / Linux**
 ```
@@ -28,10 +29,10 @@ install.bat
 Launch: **Excel Scrambler.bat** in the repo folder, or the
 **Excel Scrambler** shortcut the installer puts on your Desktop.
 
-Requirements: Python 3.10+ with tkinter (the python.org Windows installer
-includes it by default; on macOS `brew install python-tk@3.x`; on Debian/Ubuntu
-`sudo apt install python3-tk`). The install script tells you exactly what to do
-if anything is missing.
+No prerequisites beyond git: if Python 3.10+ (with tkinter) isn't already on
+the machine, the installer gets it for you — via winget or the official
+python.org installer on Windows, Homebrew on macOS, apt/dnf on Linux. If it
+truly can't (no package manager at all), it prints exact instructions.
 
 ## Using it
 

@@ -7,26 +7,42 @@ HERE="$(pwd)"
 
 echo "== Excel Scrambler installer =="
 
-# --- find a python3 ---------------------------------------------------------
+# --- find (or install) a python3 --------------------------------------------
 PY="$(command -v python3 || true)"
 if [ -z "$PY" ]; then
-    echo "ERROR: python3 not found. Install Python 3.10+ first"
-    echo "  macOS:  brew install python"
-    echo "  Linux:  sudo apt install python3 python3-venv python3-tk"
-    exit 1
+    echo "python3 not found - installing it..."
+    if [ "$(uname)" = "Darwin" ] && command -v brew >/dev/null; then
+        brew install python
+    elif command -v apt-get >/dev/null; then
+        sudo apt-get update && sudo apt-get install -y python3 python3-venv python3-tk
+    elif command -v dnf >/dev/null; then
+        sudo dnf install -y python3 python3-tkinter
+    else
+        echo "ERROR: no supported package manager found. Install Python 3.10+"
+        echo "manually (https://www.python.org/downloads/) and re-run."
+        exit 1
+    fi
+    PY="$(command -v python3 || true)"
+    [ -z "$PY" ] && { echo "ERROR: Python install failed."; exit 1; }
 fi
 echo "Using $PY ($($PY --version))"
 
-# --- check tkinter -----------------------------------------------------------
+# --- check (or install) tkinter ----------------------------------------------
 if ! "$PY" -c "import tkinter" 2>/dev/null; then
-    echo "ERROR: your Python has no tkinter (the GUI toolkit)."
-    if [ "$(uname)" = "Darwin" ]; then
+    echo "tkinter missing - installing it..."
+    if [ "$(uname)" = "Darwin" ] && command -v brew >/dev/null; then
         PYVER="$($PY -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')"
-        echo "  Fix:  brew install python-tk@$PYVER   (then re-run this script)"
-    else
-        echo "  Fix:  sudo apt install python3-tk     (then re-run this script)"
+        brew install "python-tk@$PYVER"
+    elif command -v apt-get >/dev/null; then
+        sudo apt-get install -y python3-tk
+    elif command -v dnf >/dev/null; then
+        sudo dnf install -y python3-tkinter
     fi
-    exit 1
+    if ! "$PY" -c "import tkinter" 2>/dev/null; then
+        echo "ERROR: could not install tkinter automatically. Install it for"
+        echo "your Python and re-run this script."
+        exit 1
+    fi
 fi
 
 # --- venv + dependencies -----------------------------------------------------
