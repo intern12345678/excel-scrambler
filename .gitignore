@@ -1,0 +1,13 @@
+# local environment & generated launchers (created by install scripts)
+.venv/
+Excel Scrambler.app/
+Excel Scrambler.bat
+excel-scrambler.sh
+
+# local data — never commit spreadsheets or keys
+*.xlsx
+*.xlsm
+
+# junk
+__pycache__/
+.DS_Store
