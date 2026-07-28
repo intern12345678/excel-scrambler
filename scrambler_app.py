@@ -8,10 +8,12 @@ from any key in the library. Never modifies the input file: output is always a
 new "<name>_scrambled.xlsx" / "<name>_unscrambled.xlsx" copy.
 """
 
+import base64
 import json
 import os
 import queue
 import stat
+import struct
 import subprocess
 import sys
 import threading
@@ -23,6 +25,9 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 from cryptography.fernet import Fernet, InvalidToken
+from cryptography.hazmat.primitives import hashes, hmac as crypto_hmac
+from cryptography.hazmat.primitives import padding as sym_padding
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 
@@ -97,6 +102,36 @@ def decode_value(payload: str):
     return v
 
 
+# --------------------------------------------------- deterministic encryption
+
+def deterministic_encrypt(key_b64: bytes, data: bytes) -> bytes:
+    """Fernet-compatible token whose IV is derived from the plaintext.
+
+    Identical inputs produce byte-identical tokens (so equal cells stay
+    matchable after scrambling); the token still decrypts with plain
+    Fernet.decrypt(). Trade-off: equal values are visibly equal, which
+    leaks repetition patterns — that's the point of the mode.
+    """
+    key = base64.urlsafe_b64decode(key_b64)
+    signing_key, enc_key = key[:16], key[16:]
+
+    h = crypto_hmac.HMAC(enc_key, hashes.SHA256())
+    h.update(b"excel-scrambler-deterministic-iv:" + data)
+    iv = h.finalize()[:16]
+
+    padder = sym_padding.PKCS7(128).padder()
+    padded = padder.update(data) + padder.finalize()
+    enc = Cipher(algorithms.AES(enc_key), modes.CBC(iv)).encryptor()
+    ct = enc.update(padded) + enc.finalize()
+
+    # Fernet wire format: version | timestamp | IV | ciphertext | HMAC.
+    # Timestamp is fixed at 0 so equal plaintexts yield equal tokens.
+    basic = b"\x80" + struct.pack(">Q", 0) + iv + ct
+    hm = crypto_hmac.HMAC(signing_key, hashes.SHA256())
+    hm.update(basic)
+    return base64.urlsafe_b64encode(basic + hm.finalize())
+
+
 # ------------------------------------------------------------ core engine
 
 def unique_output_path(src: Path, suffix: str) -> Path:
@@ -111,7 +146,8 @@ def unique_output_path(src: Path, suffix: str) -> Path:
         n += 1
 
 
-def scramble_file(src: Path, sheet: str, columns: list, header_exempt: bool):
+def scramble_file(src: Path, sheet: str, columns: list, skip_rows: int,
+                  deterministic: bool = False):
     """Returns (output_path, key_record_path, cells_scrambled)."""
     keep_vba = src.suffix.lower() == ".xlsm"
     wb = load_workbook(src, keep_vba=keep_vba)
@@ -119,7 +155,7 @@ def scramble_file(src: Path, sheet: str, columns: list, header_exempt: bool):
     key = Fernet.generate_key()
     fernet = Fernet(key)
 
-    start = 2 if header_exempt else 1
+    start = skip_rows + 1
     count = 0
     for col in columns:
         for row in range(start, ws.max_row + 1):
@@ -128,7 +164,11 @@ def scramble_file(src: Path, sheet: str, columns: list, header_exempt: bool):
                 continue
             if isinstance(cell.value, str) and cell.value.startswith(TOKEN_PREFIX):
                 continue  # already scrambled — don't double-wrap
-            token = fernet.encrypt(encode_value(cell.value).encode("utf-8"))
+            payload = encode_value(cell.value).encode("utf-8")
+            if deterministic:
+                token = deterministic_encrypt(key, payload)
+            else:
+                token = fernet.encrypt(payload)
             cell.value = TOKEN_PREFIX + token.decode("ascii")
             count += 1
 
@@ -137,7 +177,7 @@ def scramble_file(src: Path, sheet: str, columns: list, header_exempt: bool):
 
     record = {
         "app": "excel-scrambler",
-        "version": 1,
+        "version": 2,
         "id": uuid.uuid4().hex[:12],
         "created": datetime.now().astimezone().isoformat(timespec="seconds"),
         "key": key.decode("ascii"),
@@ -145,14 +185,22 @@ def scramble_file(src: Path, sheet: str, columns: list, header_exempt: bool):
         "output_file": str(out),
         "sheet": sheet,
         "columns": columns,
-        "header_exempt": header_exempt,
+        "skip_rows": skip_rows,
+        "deterministic": deterministic,
         "cells_scrambled": count,
     }
     key_path = save_key_record(record)
     return out, key_path, count
 
 
-def unscramble_file(src: Path, sheet: str, columns: list, header_exempt: bool,
+def record_skip_rows(rec: dict) -> int:
+    """Rows-to-skip for a key record, honoring old header_exempt records."""
+    if "skip_rows" in rec:
+        return int(rec["skip_rows"])
+    return 1 if rec.get("header_exempt", True) else 0
+
+
+def unscramble_file(src: Path, sheet: str, columns: list, skip_rows: int,
                     key_b64: str):
     """Returns (output_path, cells_restored, failures, skipped_plain)."""
     keep_vba = src.suffix.lower() == ".xlsm"
@@ -160,7 +208,7 @@ def unscramble_file(src: Path, sheet: str, columns: list, header_exempt: bool,
     ws = wb[sheet]
     fernet = Fernet(key_b64.encode("ascii"))
 
-    start = 2 if header_exempt else 1
+    start = skip_rows + 1
     restored = failures = skipped = 0
     for col in columns:
         for row in range(start, ws.max_row + 1):
@@ -329,9 +377,23 @@ class JobScreen(ttk.Frame):
         combo.pack(side="left", padx=8)
         combo.bind("<<ComboboxSelected>>", lambda e: self.load_columns())
 
-        self.header_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(row, text="First row is labels — leave it alone",
-                        variable=self.header_var).pack(side="left", padx=16)
+        ttk.Label(row, text="Skip first").pack(side="left", padx=(16, 4))
+        self.skip_var = tk.IntVar(value=1)
+        ttk.Spinbox(row, from_=0, to=9999, textvariable=self.skip_var,
+                    width=5).pack(side="left")
+        ttk.Label(row, text="row(s) — labels/headers stay untouched").pack(
+            side="left", padx=4)
+
+        if mode == "scramble":
+            optrow = ttk.Frame(self)
+            optrow.pack(fill="x", pady=(0, 8))
+            self.det_var = tk.BooleanVar(value=False)
+            ttk.Checkbutton(
+                optrow,
+                text="Match-preserving mode — identical values scramble to the "
+                     "identical token, so other programs can still match them "
+                     "(reveals which cells are equal)",
+                variable=self.det_var).pack(anchor="w")
 
         # column checklist
         ttk.Label(self, text=f"Columns to {verb.lower()}:").pack(anchor="w")
@@ -443,7 +505,7 @@ class JobScreen(ttk.Frame):
             self.load_columns()
         for letter, var in self.col_vars.items():
             var.set(letter in rec.get("columns", []))
-        self.header_var.set(bool(rec.get("header_exempt", True)))
+        self.skip_var.set(record_skip_rows(rec))
 
     def selected_key(self):
         if self.mode != "unscramble":
@@ -478,17 +540,29 @@ class JobScreen(ttk.Frame):
         self.status.config(text="Working…")
 
         sheet = self.sheet_var.get()
-        header = self.header_var.get()
+        try:
+            skip_rows = max(0, int(self.skip_var.get()))
+        except (tk.TclError, ValueError):
+            messagebox.showwarning(APP_NAME, "Rows to skip must be a number.",
+                                   parent=self)
+            self.busy = False
+            self.go_btn.state(["!disabled"])
+            self.progress.stop()
+            self.progress.pack_forget()
+            self.status.config(text="")
+            return
+        deterministic = bool(self.det_var.get()) if self.mode == "scramble" else False
         path = self.path
 
         def work():
             try:
                 if self.mode == "scramble":
-                    out, key_path, n = scramble_file(path, sheet, columns, header)
+                    out, key_path, n = scramble_file(path, sheet, columns,
+                                                     skip_rows, deterministic)
                     self.result_q.put(("ok-scramble", out, key_path, n))
                 else:
                     out, ok, bad, skipped = unscramble_file(
-                        path, sheet, columns, header, rec["key"])
+                        path, sheet, columns, skip_rows, rec["key"])
                     self.result_q.put(("ok-unscramble", out, ok, bad, skipped))
             except Exception as e:
                 self.result_q.put(("err", str(e)))

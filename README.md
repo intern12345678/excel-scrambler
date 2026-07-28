@@ -34,13 +34,29 @@ the machine, the installer gets it for you — via winget or the official
 python.org installer on Windows, Homebrew on macOS, apt/dnf on Linux. If it
 truly can't (no package manager at all), it prints exact instructions.
 
+## Updating
+
+To get the latest version, run the updater in the repo folder — it pulls the
+newest code from GitHub and re-runs the installer (new dependencies, launcher,
+shortcut) automatically:
+
+- **macOS / Linux**: `./update.sh`
+- **Windows**: `update.bat`
+
 ## Using it
 
 - **Scramble** — pick an `.xlsx`/`.xlsm` file, pick the sheet and column(s),
-  optionally exempt the first (label) row, click Scramble. A new
-  `<name>_scrambled.xlsx` is written next to the original (the original is
-  never touched) and a fresh Fernet key is saved to your key library along
-  with the file name, sheet, columns, and timestamp.
+  set how many rows from the top to skip (labels/headers — default 1, set 0
+  to scramble everything or higher to protect multi-row headers), click
+  Scramble. A new `<name>_scrambled.xlsx` is written next to the original
+  (the original is never touched) and a fresh Fernet key is saved to your key
+  library along with the file name, sheet, columns, and timestamp.
+- **Match-preserving mode** (toggle on the Scramble screen) — normally every
+  cell gets a unique random token, even for identical values. With this mode
+  on, identical values scramble to the *identical* token, so other programs
+  can still group/match rows by the scrambled value. Trade-off: anyone can
+  see which cells are equal to each other (though not what they say). Either
+  kind of file unscrambles the same way.
 - **Unscramble** — pick the scrambled file, then pick the matching key from
   the library (the app auto-selects the key whose recorded output matches the
   file and auto-fills the columns/header settings from the key). Writes
@@ -58,5 +74,7 @@ truly can't (no package manager at all), it prints exact instructions.
 - Cell types survive the round trip (numbers come back as numbers, dates as
   dates) — values are JSON-typed before encryption.
 - Encryption is Fernet (AES-128-CBC + HMAC-SHA256) from the `cryptography`
-  package; every scramble run generates a brand-new key.
+  package; every scramble run generates a brand-new key. Match-preserving
+  mode uses a Fernet-compatible deterministic variant (IV derived from the
+  cell value) — tokens still decrypt with the ordinary key.
 - Wrong key on unscramble → clear error, no output file written.
