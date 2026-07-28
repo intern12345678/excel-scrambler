@@ -147,13 +147,18 @@ def unique_output_path(src: Path, suffix: str) -> Path:
 
 
 def scramble_file(src: Path, sheet: str, columns: list, skip_rows: int,
-                  deterministic: bool = False):
-    """Returns (output_path, key_record_path, cells_scrambled)."""
+                  deterministic: bool = False, reuse_key: str = None):
+    """Returns (output_path, key_record_path, cells_scrambled).
+
+    reuse_key: an existing library key (base64 string) to scramble with
+    instead of generating a fresh one — lets several files share one key.
+    A separate record is still saved per file, each carrying the same key.
+    """
     keep_vba = src.suffix.lower() == ".xlsm"
     wb = load_workbook(src, keep_vba=keep_vba)
     ws = wb[sheet]
-    key = Fernet.generate_key()
-    fernet = Fernet(key)
+    key = reuse_key.encode("ascii") if reuse_key else Fernet.generate_key()
+    fernet = Fernet(key)  # also validates a reused key up front
 
     start = skip_rows + 1
     count = 0
@@ -187,6 +192,7 @@ def scramble_file(src: Path, sheet: str, columns: list, skip_rows: int,
         "columns": columns,
         "skip_rows": skip_rows,
         "deterministic": deterministic,
+        "reused_key": bool(reuse_key),
         "cells_scrambled": count,
     }
     key_path = save_key_record(record)
@@ -238,7 +244,11 @@ def unscramble_file(src: Path, sheet: str, columns: list, skip_rows: int,
 
 
 def sheet_column_info(path: Path, sheet: str):
-    """[(letter, header, sample), ...] for populated columns of a sheet."""
+    """[(letter, header, sample), ...] for every column in the used range.
+
+    All columns are listed (and therefore selectable) — header/sample text
+    is just a preview where the first few rows happen to have content.
+    """
     wb = load_workbook(path, read_only=True)
     ws = wb[sheet]
     max_col = ws.max_column or 1
@@ -253,12 +263,10 @@ def sheet_column_info(path: Path, sheet: str):
             elif letter not in samples:
                 samples[letter] = str(cell.value)
     wb.close()
-    info = []
-    for c in range(1, max_col + 1):
-        letter = get_column_letter(c)
-        if letter in headers or letter in samples:
-            info.append((letter, headers.get(letter, ""), samples.get(letter, "")))
-    return info
+    return [(get_column_letter(c),
+             headers.get(get_column_letter(c), ""),
+             samples.get(get_column_letter(c), ""))
+            for c in range(1, max_col + 1)]
 
 
 def sheet_names(path: Path):
@@ -395,6 +403,27 @@ class JobScreen(ttk.Frame):
                      "(reveals which cells are equal)",
                 variable=self.det_var).pack(anchor="w")
 
+            keyrow = ttk.Frame(self)
+            keyrow.pack(fill="x", pady=(0, 8))
+            self.keys = load_key_records()
+            self.keymode_var = tk.StringVar(value="new")
+            ttk.Radiobutton(keyrow, text="Generate a new key",
+                            variable=self.keymode_var, value="new",
+                            command=self.on_keymode).pack(side="left")
+            ttk.Radiobutton(keyrow, text="Reuse an existing key:",
+                            variable=self.keymode_var, value="reuse",
+                            command=self.on_keymode).pack(side="left", padx=(16, 4))
+            labels = [
+                f"{Path(r.get('source_file', '?')).name} · "
+                f"{r.get('created', '')[:16].replace('T', ' ')} · "
+                f"cols {', '.join(r.get('columns', []))}"
+                for r in self.keys]
+            self.reuse_combo = ttk.Combobox(keyrow, values=labels,
+                                            state="disabled", width=44)
+            self.reuse_combo.pack(side="left", fill="x", expand=True)
+            if labels:
+                self.reuse_combo.current(0)
+
         # column checklist
         ttk.Label(self, text=f"Columns to {verb.lower()}:").pack(anchor="w")
         colwrap = ttk.Frame(self, relief="sunken", borderwidth=1)
@@ -459,6 +488,10 @@ class JobScreen(ttk.Frame):
     def go_back(self):
         if not self.busy:
             self.app.show(MenuScreen)
+
+    def on_keymode(self):
+        state = "readonly" if self.keymode_var.get() == "reuse" else "disabled"
+        self.reuse_combo.config(state=state)
 
     def load_columns(self):
         for w in self.col_frame.winfo_children():
@@ -533,6 +566,16 @@ class JobScreen(ttk.Frame):
                                        parent=self)
                 return
 
+        reuse_key = None
+        if self.mode == "scramble" and self.keymode_var.get() == "reuse":
+            idx = self.reuse_combo.current()
+            if idx < 0 or idx >= len(self.keys):
+                messagebox.showwarning(
+                    APP_NAME, "Pick which existing key to reuse (or switch "
+                              "back to 'Generate a new key').", parent=self)
+                return
+            reuse_key = self.keys[idx]["key"]
+
         self.busy = True
         self.go_btn.state(["disabled"])
         self.progress.pack(side="right", padx=10)
@@ -558,7 +601,8 @@ class JobScreen(ttk.Frame):
             try:
                 if self.mode == "scramble":
                     out, key_path, n = scramble_file(path, sheet, columns,
-                                                     skip_rows, deterministic)
+                                                     skip_rows, deterministic,
+                                                     reuse_key)
                     self.result_q.put(("ok-scramble", out, key_path, n))
                 else:
                     out, ok, bad, skipped = unscramble_file(

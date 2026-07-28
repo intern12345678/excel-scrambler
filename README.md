@@ -45,12 +45,19 @@ shortcut) automatically:
 
 ## Using it
 
-- **Scramble** — pick an `.xlsx`/`.xlsm` file, pick the sheet and column(s),
-  set how many rows from the top to skip (labels/headers — default 1, set 0
-  to scramble everything or higher to protect multi-row headers), click
-  Scramble. A new `<name>_scrambled.xlsx` is written next to the original
-  (the original is never touched) and a fresh Fernet key is saved to your key
-  library along with the file name, sheet, columns, and timestamp.
+- **Scramble** — pick an `.xlsx`/`.xlsm` file, pick the sheet and column(s)
+  (every column in the sheet is listed and selectable, whether or not it has
+  a header), set how many rows from the top to skip (labels/headers —
+  default 1, set 0 to scramble everything or higher to protect multi-row
+  headers), click Scramble. A new `<name>_scrambled.xlsx` is written next to
+  the original (the original is never touched) and a Fernet key is saved to
+  your key library along with the file name, sheet, columns, and timestamp.
+- **Sharing one key across files** — by default every scramble generates a
+  brand-new key, but the Scramble screen lets you pick **"Reuse an existing
+  key"** and choose any key from your library. Each file still gets its own
+  library entry (so unscrambling auto-matches per file), they just all carry
+  the same key. Combined with match-preserving mode, the same value scrambles
+  to the same token *across files*, so cross-file matching keeps working.
 - **Match-preserving mode** (toggle on the Scramble screen) — normally every
   cell gets a unique random token, even for identical values. With this mode
   on, identical values scramble to the *identical* token, so other programs
