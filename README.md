@@ -36,9 +36,10 @@ truly can't (no package manager at all), it prints exact instructions.
 
 ## Updating
 
-To get the latest version, run the updater in the repo folder — it pulls the
-newest code from GitHub and re-runs the installer (new dependencies, launcher,
-shortcut) automatically:
+Click **⟳ Check for updates** on the app's main menu — it pulls the newest
+code from GitHub, installs any new dependencies, and offers to restart into
+the new version. Equivalently, run the updater in the repo folder (this route
+also regenerates the launcher/desktop shortcut):
 
 - **macOS / Linux**: `./update.sh`
 - **Windows**: `update.bat`

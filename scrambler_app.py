@@ -32,6 +32,7 @@ from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 
 APP_NAME = "Excel Scrambler"
+APP_DIR = Path(__file__).resolve().parent
 KEY_DIR = Path.home() / ".excel-scrambler" / "keys"
 TOKEN_PREFIX = "XSCRAMBLE1:"  # marks a cell as scrambled by this app
 EXCEL_TYPES = [("Excel workbooks", "*.xlsx *.xlsm")]
@@ -333,11 +334,73 @@ class MenuScreen(ttk.Frame):
                    command=lambda: self.pick(mode="unscramble")).pack(pady=10)
         ttk.Button(box, text="🗝  Key library", style="Big.TButton", width=26,
                    command=lambda: self.app.show(KeyLibraryScreen)).pack(pady=10)
+        self.update_btn = ttk.Button(box, text="⟳  Check for updates",
+                                     style="Big.TButton", width=26,
+                                     command=self.update_app)
+        self.update_btn.pack(pady=10)
+        self.update_q = queue.Queue()
 
         n = len(load_key_records())
         ttk.Label(self, text=f"{n} key{'s' if n != 1 else ''} in library  ·  "
                              f"stored in {KEY_DIR}",
                   style="Sub.TLabel").pack(side="bottom", pady=10)
+
+    def update_app(self):
+        """Pull the latest version from GitHub and reinstall dependencies."""
+        self.update_btn.state(["disabled"])
+        self.update_btn.config(text="⟳  Updating…")
+
+        def work():
+            try:
+                r = subprocess.run(["git", "pull", "--ff-only"], cwd=APP_DIR,
+                                   capture_output=True, text=True, timeout=180)
+                if r.returncode != 0:
+                    self.update_q.put(("err", (r.stderr or r.stdout).strip()))
+                    return
+                if "Already up to date" in r.stdout:
+                    self.update_q.put(("current", None))
+                    return
+                p = subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "--quiet",
+                     "-r", str(APP_DIR / "requirements.txt")],
+                    capture_output=True, text=True, timeout=600)
+                if p.returncode != 0:
+                    self.update_q.put(("err", "Code was updated but installing "
+                                       "dependencies failed:\n"
+                                       + (p.stderr or p.stdout).strip()))
+                    return
+                self.update_q.put(("updated", r.stdout.strip()))
+            except FileNotFoundError:
+                self.update_q.put(("err", "git was not found on this machine — "
+                                   "run the update script in the app folder "
+                                   "instead (update.sh / update.bat)."))
+            except Exception as e:
+                self.update_q.put(("err", str(e)))
+
+        threading.Thread(target=work, daemon=True).start()
+        self.after(150, self.poll_update)
+
+    def poll_update(self):
+        try:
+            kind, detail = self.update_q.get_nowait()
+        except queue.Empty:
+            self.after(150, self.poll_update)
+            return
+        self.update_btn.state(["!disabled"])
+        self.update_btn.config(text="⟳  Check for updates")
+        if kind == "err":
+            messagebox.showerror(APP_NAME, f"Update failed:\n\n{detail}",
+                                 parent=self)
+        elif kind == "current":
+            messagebox.showinfo(APP_NAME, "You're already on the latest "
+                                          "version.", parent=self)
+        else:
+            if messagebox.askyesno(
+                    APP_NAME,
+                    "Update installed.\n\nRestart Excel Scrambler now to use "
+                    "the new version?", parent=self):
+                os.execl(sys.executable, sys.executable,
+                         str(APP_DIR / "scrambler_app.py"))
 
     def pick(self, mode):
         path = filedialog.askopenfilename(
