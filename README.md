@@ -57,13 +57,13 @@ also regenerates the launcher/desktop shortcut):
   brand-new key, but the Scramble screen lets you pick **"Reuse an existing
   key"** and choose any key from your library. Each file still gets its own
   library entry (so unscrambling auto-matches per file), they just all carry
-  the same key. Combined with match-preserving mode, the same value scrambles
-  to the same token *across files*, so cross-file matching keeps working.
-- **Match-preserving mode** (toggle on the Scramble screen) — normally every
-  cell gets a unique random token, even for identical values. With this mode
-  on, identical values scramble to the *identical* token, so other programs
-  can still group/match rows by the scrambled value. Trade-off: anyone can
-  see which cells are equal to each other (though not what they say). Either
+  the same key. With match-preserving mode on, the same value scrambles to the
+  same token *across files*, so cross-file matching keeps working.
+- **Match-preserving mode** (toggle on the Scramble screen, **on by default**)
+  — identical values scramble to the *identical* token, so other programs can
+  still group/match rows by the scrambled value. Trade-off: anyone can see
+  which cells are equal to each other (though not what they say). Turn it off
+  to give every cell a unique random token, even for identical values. Either
   kind of file unscrambles the same way.
 - **Unscramble** — pick the scrambled file, then pick the matching key from
   the library (the app auto-selects the key whose recorded output matches the
@@ -82,7 +82,8 @@ also regenerates the launcher/desktop shortcut):
 - Cell types survive the round trip (numbers come back as numbers, dates as
   dates) — values are JSON-typed before encryption.
 - Encryption is Fernet (AES-128-CBC + HMAC-SHA256) from the `cryptography`
-  package; every scramble run generates a brand-new key. Match-preserving
-  mode uses a Fernet-compatible deterministic variant (IV derived from the
-  cell value) — tokens still decrypt with the ordinary key.
+  package; every scramble run generates a brand-new key unless you reuse one.
+  Match-preserving mode uses a Fernet-compatible deterministic variant (IV
+  derived from the cell value) — tokens still decrypt with the ordinary key,
+  so both modes unscramble identically.
 - Wrong key on unscramble → clear error, no output file written.

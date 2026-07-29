@@ -148,8 +148,11 @@ def unique_output_path(src: Path, suffix: str) -> Path:
 
 
 def scramble_file(src: Path, sheet: str, columns: list, skip_rows: int,
-                  deterministic: bool = False, reuse_key: str = None):
+                  deterministic: bool = True, reuse_key: str = None):
     """Returns (output_path, key_record_path, cells_scrambled).
+
+    deterministic: match-preserving mode (the default) — identical values
+    scramble to identical tokens. Off means every cell gets a unique token.
 
     reuse_key: an existing library key (base64 string) to scramble with
     instead of generating a fresh one — lets several files share one key.
@@ -458,7 +461,7 @@ class JobScreen(ttk.Frame):
         if mode == "scramble":
             optrow = ttk.Frame(self)
             optrow.pack(fill="x", pady=(0, 8))
-            self.det_var = tk.BooleanVar(value=False)
+            self.det_var = tk.BooleanVar(value=True)
             ttk.Checkbutton(
                 optrow,
                 text="Match-preserving mode — identical values scramble to the "
