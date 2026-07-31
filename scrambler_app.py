@@ -147,9 +147,22 @@ def unique_output_path(src: Path, suffix: str) -> Path:
         n += 1
 
 
-def scramble_file(src: Path, sheet: str, columns: list, skip_rows: int,
-                  deterministic: bool = True, reuse_key: str = None):
+def open_sheet(wb, name: str):
+    """wb[name] with an error that names the sheet instead of a bare KeyError."""
+    if name not in wb.sheetnames:
+        raise KeyError(f"This workbook has no sheet named {name!r}. "
+                       f"It contains: {', '.join(wb.sheetnames)}")
+    return wb[name]
+
+
+def scramble_file(src: Path, specs: list, deterministic: bool = True,
+                  reuse_key: str = None):
     """Returns (output_path, key_record_path, cells_scrambled).
+
+    specs: one entry per sheet to process —
+        [{"sheet": name, "columns": [letters], "skip_rows": int}, ...]
+    Each sheet carries its own columns and its own rows-to-skip, so one run
+    can scramble e.g. Sheet1!A skipping 5 rows and Sheet2!B,C skipping 8.
 
     deterministic: match-preserving mode (the default) — identical values
     scramble to identical tokens. Off means every cell gets a unique token.
@@ -160,41 +173,46 @@ def scramble_file(src: Path, sheet: str, columns: list, skip_rows: int,
     """
     keep_vba = src.suffix.lower() == ".xlsm"
     wb = load_workbook(src, keep_vba=keep_vba)
-    ws = wb[sheet]
     key = reuse_key.encode("ascii") if reuse_key else Fernet.generate_key()
     fernet = Fernet(key)  # also validates a reused key up front
 
-    start = skip_rows + 1
     count = 0
-    for col in columns:
-        for row in range(start, ws.max_row + 1):
-            cell = ws[f"{col}{row}"]
-            if cell.value is None or cell.value == "":
-                continue
-            if isinstance(cell.value, str) and cell.value.startswith(TOKEN_PREFIX):
-                continue  # already scrambled — don't double-wrap
-            payload = encode_value(cell.value).encode("utf-8")
-            if deterministic:
-                token = deterministic_encrypt(key, payload)
-            else:
-                token = fernet.encrypt(payload)
-            cell.value = TOKEN_PREFIX + token.decode("ascii")
-            count += 1
+    for spec in specs:
+        ws = open_sheet(wb, spec["sheet"])
+        start = int(spec["skip_rows"]) + 1
+        for col in spec["columns"]:
+            for row in range(start, ws.max_row + 1):
+                cell = ws[f"{col}{row}"]
+                if cell.value is None or cell.value == "":
+                    continue
+                if isinstance(cell.value, str) and cell.value.startswith(TOKEN_PREFIX):
+                    continue  # already scrambled — don't double-wrap
+                payload = encode_value(cell.value).encode("utf-8")
+                if deterministic:
+                    token = deterministic_encrypt(key, payload)
+                else:
+                    token = fernet.encrypt(payload)
+                cell.value = TOKEN_PREFIX + token.decode("ascii")
+                count += 1
 
     out = unique_output_path(src, "scrambled")
     wb.save(out)
 
     record = {
         "app": "excel-scrambler",
-        "version": 2,
+        "version": 3,
         "id": uuid.uuid4().hex[:12],
         "created": datetime.now().astimezone().isoformat(timespec="seconds"),
         "key": key.decode("ascii"),
         "source_file": str(src),
         "output_file": str(out),
-        "sheet": sheet,
-        "columns": columns,
-        "skip_rows": skip_rows,
+        "sheets": [{"sheet": s["sheet"], "columns": list(s["columns"]),
+                    "skip_rows": int(s["skip_rows"])} for s in specs],
+        # Mirror of the first sheet, so a pre-v3 build reading this record
+        # still finds something sensible instead of nothing.
+        "sheet": specs[0]["sheet"],
+        "columns": list(specs[0]["columns"]),
+        "skip_rows": int(specs[0]["skip_rows"]),
         "deterministic": deterministic,
         "reused_key": bool(reuse_key),
         "cells_scrambled": count,
@@ -210,32 +228,60 @@ def record_skip_rows(rec: dict) -> int:
     return 1 if rec.get("header_exempt", True) else 0
 
 
-def unscramble_file(src: Path, sheet: str, columns: list, skip_rows: int,
-                    key_b64: str):
-    """Returns (output_path, cells_restored, failures, skipped_plain)."""
+def record_specs(rec: dict) -> list:
+    """Per-sheet specs for a key record, honoring older single-sheet records."""
+    sheets = rec.get("sheets")
+    if sheets:
+        return [{"sheet": s.get("sheet"), "columns": list(s.get("columns", [])),
+                 "skip_rows": int(s.get("skip_rows", 1))} for s in sheets]
+    return [{"sheet": rec.get("sheet"), "columns": list(rec.get("columns", [])),
+             "skip_rows": record_skip_rows(rec)}]
+
+
+def specs_sheet_text(specs: list) -> str:
+    return ", ".join(str(s["sheet"]) for s in specs)
+
+
+def specs_columns_text(specs: list) -> str:
+    return " · ".join(", ".join(s["columns"]) for s in specs)
+
+
+def specs_summary(specs: list) -> str:
+    """Human-readable one-liner: 'Sheet1: A (skip 5)  ·  Sheet2: B, C (skip 8)'."""
+    return "   ·   ".join(
+        f"{s['sheet']}: {', '.join(s['columns'])} (skip {s['skip_rows']})"
+        for s in specs)
+
+
+def unscramble_file(src: Path, specs: list, key_b64: str):
+    """Returns (output_path, cells_restored, failures, skipped_plain).
+
+    specs has the same shape as scramble_file's — one entry per sheet.
+    """
     keep_vba = src.suffix.lower() == ".xlsm"
     wb = load_workbook(src, keep_vba=keep_vba)
-    ws = wb[sheet]
     fernet = Fernet(key_b64.encode("ascii"))
 
-    start = skip_rows + 1
     restored = failures = skipped = 0
-    for col in columns:
-        for row in range(start, ws.max_row + 1):
-            cell = ws[f"{col}{row}"]
-            v = cell.value
-            if v is None or v == "":
-                continue
-            if not (isinstance(v, str) and v.startswith(TOKEN_PREFIX)):
-                skipped += 1
-                continue
-            token = v[len(TOKEN_PREFIX):].encode("ascii")
-            try:
-                payload = fernet.decrypt(token).decode("utf-8")
-                cell.value = decode_value(payload)
-                restored += 1
-            except (InvalidToken, ValueError, json.JSONDecodeError):
-                failures += 1
+    for spec in specs:
+        ws = open_sheet(wb, spec["sheet"])
+        start = int(spec["skip_rows"]) + 1
+        for col in spec["columns"]:
+            for row in range(start, ws.max_row + 1):
+                cell = ws[f"{col}{row}"]
+                v = cell.value
+                if v is None or v == "":
+                    continue
+                if not (isinstance(v, str) and v.startswith(TOKEN_PREFIX)):
+                    skipped += 1
+                    continue
+                token = v[len(TOKEN_PREFIX):].encode("ascii")
+                try:
+                    payload = fernet.decrypt(token).decode("utf-8")
+                    cell.value = decode_value(payload)
+                    restored += 1
+                except (InvalidToken, ValueError, json.JSONDecodeError):
+                    failures += 1
 
     if restored == 0 and failures > 0:
         raise InvalidToken(
@@ -433,6 +479,12 @@ class JobScreen(ttk.Frame):
         self.app, self.mode, self.path, self.sheets = app, mode, path, sheets
         self.busy = False
         self.result_q = queue.Queue()
+        # sheet name -> {"columns": [...], "skip_rows": int}. Selections are kept
+        # per sheet, so several sheets can be set up before running.
+        self.specs = {}
+        self.current_sheet = sheets[0]
+        self.missing_sheets = []
+        self._loading = False
         verb = "Scramble" if mode == "scramble" else "Unscramble"
 
         head = ttk.Frame(self)
@@ -449,14 +501,18 @@ class JobScreen(ttk.Frame):
         combo = ttk.Combobox(row, textvariable=self.sheet_var, values=sheets,
                              state="readonly", width=28)
         combo.pack(side="left", padx=8)
-        combo.bind("<<ComboboxSelected>>", lambda e: self.load_columns())
+        combo.bind("<<ComboboxSelected>>", lambda e: self.on_sheet_change())
 
         ttk.Label(row, text="Skip first").pack(side="left", padx=(16, 4))
         self.skip_var = tk.IntVar(value=1)
         ttk.Spinbox(row, from_=0, to=9999, textvariable=self.skip_var,
                     width=5).pack(side="left")
-        ttk.Label(row, text="row(s) — labels/headers stay untouched").pack(
-            side="left", padx=4)
+        ttk.Label(row, text="row(s) on this sheet").pack(side="left", padx=4)
+
+        ttk.Label(self, text="Each sheet keeps its own columns and its own "
+                             "rows-to-skip — set one up, switch sheets, and "
+                             "set up another. Everything listed below runs "
+                             "together.", style="Sub.TLabel").pack(anchor="w")
 
         if mode == "scramble":
             optrow = ttk.Frame(self)
@@ -482,7 +538,7 @@ class JobScreen(ttk.Frame):
             labels = [
                 f"{Path(r.get('source_file', '?')).name} · "
                 f"{r.get('created', '')[:16].replace('T', ' ')} · "
-                f"cols {', '.join(r.get('columns', []))}"
+                f"cols {specs_columns_text(record_specs(r))}"
                 for r in self.keys]
             self.reuse_combo = ttk.Combobox(keyrow, values=labels,
                                             state="disabled", width=44)
@@ -491,9 +547,10 @@ class JobScreen(ttk.Frame):
                 self.reuse_combo.current(0)
 
         # column checklist
-        ttk.Label(self, text=f"Columns to {verb.lower()}:").pack(anchor="w")
+        ttk.Label(self, text=f"Columns to {verb.lower()} on this sheet:").pack(
+            anchor="w")
         colwrap = ttk.Frame(self, relief="sunken", borderwidth=1)
-        colwrap.pack(fill="both", expand=True, pady=(4, 10))
+        colwrap.pack(fill="both", expand=True, pady=(4, 4))
         self.canvas = tk.Canvas(colwrap, highlightthickness=0)
         vsb = ttk.Scrollbar(colwrap, orient="vertical", command=self.canvas.yview)
         self.canvas.configure(yscrollcommand=vsb.set)
@@ -505,6 +562,11 @@ class JobScreen(ttk.Frame):
             scrollregion=self.canvas.bbox("all")))
         self.col_vars = {}
 
+        # running total across every sheet configured so far
+        self.summary = ttk.Label(self, text="", style="Sub.TLabel",
+                                 wraplength=760, justify="left")
+        self.summary.pack(anchor="w", pady=(0, 8))
+
         # key picker (unscramble only)
         if mode == "unscramble":
             ttk.Label(self, text="Key from your library:").pack(anchor="w")
@@ -514,10 +576,10 @@ class JobScreen(ttk.Frame):
             self.keys = load_key_records()
             self.tree = ttk.Treeview(keywrap, columns=cols, show="headings",
                                      height=min(6, max(3, len(self.keys))))
-            for cid, txt, w in (("file", "Original file", 240),
-                                ("when", "Scrambled at", 160),
-                                ("sheet", "Sheet", 90),
-                                ("columns", "Columns", 90)):
+            for cid, txt, w in (("file", "Original file", 220),
+                                ("when", "Scrambled at", 150),
+                                ("sheet", "Sheet(s)", 120),
+                                ("columns", "Columns", 120)):
                 self.tree.heading(cid, text=txt)
                 self.tree.column(cid, width=w, anchor="w")
             ksb = ttk.Scrollbar(keywrap, orient="vertical",
@@ -527,9 +589,10 @@ class JobScreen(ttk.Frame):
             self.tree.pack(side="left", fill="x", expand=True)
             for rec in self.keys:
                 when = rec.get("created", "")[:16].replace("T", "  ")
+                specs = record_specs(rec)
                 self.tree.insert("", "end", iid=rec["id"], values=(
                     Path(rec.get("source_file", "?")).name, when,
-                    rec.get("sheet", ""), ", ".join(rec.get("columns", []))))
+                    specs_sheet_text(specs), specs_columns_text(specs)))
             self.tree.bind("<<TreeviewSelect>>", self.on_key_selected)
             if not self.keys:
                 ttk.Label(self, text="No keys in your library yet — scramble "
@@ -547,7 +610,10 @@ class JobScreen(ttk.Frame):
         self.go_btn.pack(side="right")
         self.progress = ttk.Progressbar(foot, mode="indeterminate", length=160)
 
+        # traced last, so building the form above can't fire it early
+        self.skip_var.trace_add("write", self.on_change)
         self.load_columns()
+        self.refresh_summary()
 
     # -- helpers
 
@@ -559,29 +625,84 @@ class JobScreen(ttk.Frame):
         state = "readonly" if self.keymode_var.get() == "reuse" else "disabled"
         self.reuse_combo.config(state=state)
 
-    def load_columns(self):
-        for w in self.col_frame.winfo_children():
-            w.destroy()
-        self.col_vars = {}
+    def skip_value(self):
+        """The skip box as an int, or None while it holds something unusable."""
         try:
-            info = sheet_column_info(self.path, self.sheet_var.get())
-        except Exception as e:
-            messagebox.showerror(APP_NAME, f"Could not read sheet:\n{e}",
-                                 parent=self)
+            return max(0, int(self.skip_var.get()))
+        except (tk.TclError, ValueError):
+            return None
+
+    def stash(self):
+        """Save the visible sheet's selection so switching sheets doesn't lose it."""
+        cols = [c for c, v in self.col_vars.items() if v.get()]
+        if not cols:
+            self.specs.pop(self.current_sheet, None)
             return
-        if not info:
-            ttk.Label(self.col_frame, text="(sheet is empty)").pack(anchor="w")
-            return
-        for letter, header, sample in info:
-            var = tk.BooleanVar(value=False)
-            desc = f"{letter}"
-            if header:
-                desc += f"   —   {truncate(header)}"
-            if sample:
-                desc += f"    (e.g. {truncate(sample)})"
-            ttk.Checkbutton(self.col_frame, text=desc, variable=var).pack(
-                anchor="w", padx=8, pady=2)
-            self.col_vars[letter] = var
+        skip = self.skip_value()
+        if skip is None:  # mid-edit; keep whatever was last valid for this sheet
+            skip = self.specs.get(self.current_sheet, {}).get("skip_rows", 1)
+        self.specs[self.current_sheet] = {"columns": cols, "skip_rows": skip}
+
+    def current_specs(self):
+        """Every configured sheet, in workbook order, including the visible one."""
+        self.stash()
+        return [{"sheet": s, **self.specs[s]}
+                for s in self.sheets if s in self.specs]
+
+    def on_change(self, *_):
+        if not self._loading:
+            self.refresh_summary()
+
+    def refresh_summary(self):
+        specs = self.current_specs()
+        if specs:
+            n = sum(len(s["columns"]) for s in specs)
+            txt = (f"Will run on {len(specs)} sheet(s), {n} column(s) — "
+                   + specs_summary(specs))
+        else:
+            txt = "Nothing selected yet — tick at least one column."
+        if self.missing_sheets:
+            txt += ("\n⚠️  This key also covers sheet(s) not in this file: "
+                    + ", ".join(self.missing_sheets))
+        self.summary.config(text=txt)
+
+    def on_sheet_change(self):
+        self.stash()                       # before current_sheet moves on
+        self.current_sheet = self.sheet_var.get()
+        self.load_columns()
+        self.refresh_summary()
+
+    def load_columns(self):
+        self._loading = True
+        try:
+            for w in self.col_frame.winfo_children():
+                w.destroy()
+            self.col_vars = {}
+            saved = self.specs.get(self.current_sheet)
+            self.skip_var.set(saved["skip_rows"] if saved else 1)
+            try:
+                info = sheet_column_info(self.path, self.current_sheet)
+            except Exception as e:
+                messagebox.showerror(APP_NAME, f"Could not read sheet:\n{e}",
+                                     parent=self)
+                return
+            if not info:
+                ttk.Label(self.col_frame, text="(sheet is empty)").pack(anchor="w")
+                return
+            for letter, header, sample in info:
+                var = tk.BooleanVar(
+                    value=bool(saved and letter in saved["columns"]))
+                desc = f"{letter}"
+                if header:
+                    desc += f"   —   {truncate(header)}"
+                if sample:
+                    desc += f"    (e.g. {truncate(sample)})"
+                ttk.Checkbutton(self.col_frame, text=desc, variable=var,
+                                command=self.on_change).pack(
+                    anchor="w", padx=8, pady=2)
+                self.col_vars[letter] = var
+        finally:
+            self._loading = False
 
     def preselect_key(self):
         """Auto-select the newest key whose output file matches the chosen file."""
@@ -597,14 +718,20 @@ class JobScreen(ttk.Frame):
         rec = self.selected_key()
         if not rec:
             return
-        # mirror the key's recorded sheet, columns and header setting into the form
-        key_sheet = rec.get("sheet")
-        if key_sheet and key_sheet != self.sheet_var.get() and key_sheet in self.sheets:
-            self.sheet_var.set(key_sheet)
-            self.load_columns()
-        for letter, var in self.col_vars.items():
-            var.set(letter in rec.get("columns", []))
-        self.skip_var.set(record_skip_rows(rec))
+        # mirror every sheet the key recorded into the form
+        self.specs = {}
+        self.missing_sheets = []
+        for spec in record_specs(rec):
+            if spec["sheet"] in self.sheets:
+                self.specs[spec["sheet"]] = {"columns": spec["columns"],
+                                             "skip_rows": spec["skip_rows"]}
+            else:
+                self.missing_sheets.append(str(spec["sheet"]))
+        first = next(iter(self.specs), self.current_sheet)
+        self.sheet_var.set(first)
+        self.current_sheet = first
+        self.load_columns()
+        self.refresh_summary()
 
     def selected_key(self):
         if self.mode != "unscramble":
@@ -619,10 +746,16 @@ class JobScreen(ttk.Frame):
     def run(self):
         if self.busy:
             return
-        columns = [c for c, v in self.col_vars.items() if v.get()]
-        if not columns:
-            messagebox.showwarning(APP_NAME, "Select at least one column.",
+        if self.skip_value() is None:
+            messagebox.showwarning(APP_NAME, "Rows to skip must be a number.",
                                    parent=self)
+            return
+        specs = self.current_specs()
+        if not specs:
+            messagebox.showwarning(
+                APP_NAME, "Select at least one column. You can set up several "
+                          "sheets before running — switch sheets with the "
+                          "picker at the top.", parent=self)
             return
         rec = None
         if self.mode == "unscramble":
@@ -648,31 +781,19 @@ class JobScreen(ttk.Frame):
         self.progress.start(12)
         self.status.config(text="Working…")
 
-        sheet = self.sheet_var.get()
-        try:
-            skip_rows = max(0, int(self.skip_var.get()))
-        except (tk.TclError, ValueError):
-            messagebox.showwarning(APP_NAME, "Rows to skip must be a number.",
-                                   parent=self)
-            self.busy = False
-            self.go_btn.state(["!disabled"])
-            self.progress.stop()
-            self.progress.pack_forget()
-            self.status.config(text="")
-            return
         deterministic = bool(self.det_var.get()) if self.mode == "scramble" else False
         path = self.path
+        n_sheets = len(specs)
 
         def work():
             try:
                 if self.mode == "scramble":
-                    out, key_path, n = scramble_file(path, sheet, columns,
-                                                     skip_rows, deterministic,
+                    out, key_path, n = scramble_file(path, specs, deterministic,
                                                      reuse_key)
-                    self.result_q.put(("ok-scramble", out, key_path, n))
+                    self.result_q.put(("ok-scramble", out, key_path, n, n_sheets))
                 else:
                     out, ok, bad, skipped = unscramble_file(
-                        path, sheet, columns, skip_rows, rec["key"])
+                        path, specs, rec["key"])
                     self.result_q.put(("ok-unscramble", out, ok, bad, skipped))
             except Exception as e:
                 self.result_q.put(("err", str(e)))
@@ -698,9 +819,10 @@ class JobScreen(ttk.Frame):
                                  parent=self)
             return
         if kind == "ok-scramble":
-            _, out, key_path, n = res
+            _, out, key_path, n, n_sheets = res
             messagebox.showinfo(APP_NAME,
-                f"Scrambled {n} cells.\n\nNew file:\n{out}\n\n"
+                f"Scrambled {n} cells across {n_sheets} sheet(s).\n\n"
+                f"New file:\n{out}\n\n"
                 f"Key saved to your library:\n{key_path}", parent=self)
         else:
             _, out, ok, bad, skipped = res
@@ -727,10 +849,10 @@ class KeyLibraryScreen(ttk.Frame):
 
         cols = ("file", "when", "sheet", "columns", "cells")
         self.tree = ttk.Treeview(self, columns=cols, show="headings")
-        for cid, txt, w in (("file", "Original file", 230),
-                            ("when", "Scrambled at", 150),
-                            ("sheet", "Sheet", 90),
-                            ("columns", "Columns", 90),
+        for cid, txt, w in (("file", "Original file", 210),
+                            ("when", "Scrambled at", 140),
+                            ("sheet", "Sheet(s)", 120),
+                            ("columns", "Columns", 120),
                             ("cells", "Cells", 60)):
             self.tree.heading(cid, text=txt)
             self.tree.column(cid, width=w, anchor="w")
@@ -749,9 +871,10 @@ class KeyLibraryScreen(ttk.Frame):
         self.keys = load_key_records()
         for rec in self.keys:
             when = rec.get("created", "")[:16].replace("T", "  ")
+            specs = record_specs(rec)
             self.tree.insert("", "end", iid=rec["id"], values=(
                 Path(rec.get("source_file", "?")).name, when,
-                rec.get("sheet", ""), ", ".join(rec.get("columns", [])),
+                specs_sheet_text(specs), specs_columns_text(specs),
                 rec.get("cells_scrambled", "")))
 
     def _selected(self):

@@ -46,13 +46,21 @@ also regenerates the launcher/desktop shortcut):
 
 ## Using it
 
-- **Scramble** — pick an `.xlsx`/`.xlsm` file, pick the sheet and column(s)
+- **Scramble** — pick an `.xlsx`/`.xlsm` file, pick a sheet and its column(s)
   (every column in the sheet is listed and selectable, whether or not it has
   a header), set how many rows from the top to skip (labels/headers —
   default 1, set 0 to scramble everything or higher to protect multi-row
   headers), click Scramble. A new `<name>_scrambled.xlsx` is written next to
   the original (the original is never touched) and a Fernet key is saved to
-  your key library along with the file name, sheet, columns, and timestamp.
+  your key library along with the file name, sheets, columns, and timestamp.
+- **Several sheets in one run** — columns and rows-to-skip are remembered
+  *per sheet*, so you can set up one sheet, switch to another with the sheet
+  picker, set that one up differently, and scramble them all together. For
+  example Sheet1 column A skipping 5 rows *and* Sheet2 columns B and C
+  skipping 8 rows, in a single pass with a single key. A line under the
+  column list always shows every sheet you have configured so far, so you can
+  see exactly what will run before you click. Sheets you never touch are left
+  completely alone.
 - **Sharing one key across files** — by default every scramble generates a
   brand-new key, but the Scramble screen lets you pick **"Reuse an existing
   key"** and choose any key from your library. Each file still gets its own
@@ -67,7 +75,8 @@ also regenerates the launcher/desktop shortcut):
   kind of file unscrambles the same way.
 - **Unscramble** — pick the scrambled file, then pick the matching key from
   the library (the app auto-selects the key whose recorded output matches the
-  file and auto-fills the columns/header settings from the key). Writes
+  file and auto-fills every sheet, its columns, and its skip setting from the
+  key). Multi-sheet files restore in one pass. Writes
   `<name>_unscrambled.xlsx`.
 - **Key library** — browse all saved keys, reveal a scrambled file in
   Finder/Explorer, or permanently delete a key (with a warning — a deleted
@@ -75,8 +84,10 @@ also regenerates the launcher/desktop shortcut):
 
 ## Details
 
-- Keys live in `~/.excel-scrambler/keys/` as one JSON file per scramble.
-  Deleting a key makes the data in its file unrecoverable.
+- Keys live in `~/.excel-scrambler/keys/` as one JSON file per scramble,
+  recording every sheet that was scrambled with its own columns and
+  rows-to-skip. Deleting a key makes the data in its file unrecoverable.
+  Keys written by earlier versions (single-sheet) still work unchanged.
 - Scrambled cells carry an `XSCRAMBLE1:` prefix so the app recognizes them,
   refuses to double-scramble, and skips non-scrambled cells on restore.
 - Cell types survive the round trip (numbers come back as numbers, dates as
